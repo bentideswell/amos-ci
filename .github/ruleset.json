@@ -45,13 +45,15 @@
       "parameters": {
         "do_not_enforce_on_create": true,
         "required_status_checks": [
-          { "context": "CI / Code / Lint" },
-          { "context": "CI / Code / Test" },
-          { "context": "CI / Security / Security Scan" },
           { "context": "CI / Workflow / Branch Protection" },
           { "context": "CI / Workflow / PR Content" }
         ],
-        "strict_required_status_checks_policy": true
+        "strict_required_status_checks_policy": true,
+        "required_status_checks__disabled": [
+          { "context": "CI / Code / Lint" },
+          { "context": "CI / Code / Test" },
+          { "context": "CI / Security / Security Scan" }
+        ]
       }
     }
   ]

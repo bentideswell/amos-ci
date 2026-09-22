@@ -128,7 +128,7 @@ body_clean="$(printf '%s\n' "$body" | strip_comments)"
 # --- Title: Conventional Commits ---
 title_regex='^(feat|fix|chore|docs|test|refactor|perf|hotfix|patch)(\([a-z0-9._-]+\))?!?: .+'
 if [[ ! "$title" =~ $title_regex ]]; then
-  fail "PR title '$title' is not in Conventional Commits format (e.g. 'fix: short description')."
+  fail "The PR title \`$title\` is not in accepted format (e.g. 'fix: short description')."
 fi
 
 # --- Release Notes section (deployment manager) ---
@@ -145,14 +145,14 @@ release_notes_trimmed="$(
     | sed -E '/^#{1,6}[[:space:]]*(Added|Changed|Fixed|Removed|Deprecated|Security)[[:space:]]*$/Id'
 )"
 if [[ -z "$release_notes_trimmed" ]]; then
-  fail "Missing or empty '## Release Notes' section. Required for every ${pr_type} PR — see pull_request_template.md."
+  fail "Missing or empty \`## Release Notes\` section. Required for every **${pr_type}** PR — see pull_request_template.md."
 fi
 
 # --- Client impact line (client release-notes plugin + client-facing label) ---
 client_line="$(printf '%s\n' "$body_clean" | grep -im1 '^client impact:' || true)"
 client_value="$(sed -E 's/^[Cc]lient [Ii]mpact:[[:space:]]*//' <<<"$client_line" | sed -E 's/[[:space:]]+$//')"
 if [[ -z "$client_value" ]]; then
-  fail "Missing or empty 'Client impact:' line. Write 'Client impact: none' if there is genuinely no client-visible effect."
+  fail "Missing or empty \`Client impact:\` line. Write \`Client impact: none\` if there is genuinely no client-visible effect."
 fi
 
 # Lowercase via tr, not ${var,,} (bash 4+ only) - macOS ships bash 3.2 as
