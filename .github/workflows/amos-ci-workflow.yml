@@ -239,7 +239,7 @@ jobs:
           # merge once it's fixed, same as before this step existed.
           gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" || true
 
-      - name: Set PR body for Promotion/Backport/Cascade PRs
+      - name: Set PR title/body for Promotion/Backport/Cascade PRs
         if: github.event.action == 'opened' && steps.policy.outputs.valid == 'true'
         shell: bash
         env:
@@ -253,7 +253,7 @@ jobs:
           set -euo pipefail
 
           # Same "applicable" split as check-pr-content.sh: these PR types
-          # require the template's sections filled in, so leave their body
+          # require the template's sections filled in, so leave title/body
           # alone -- this step only touches Promotion/Backport/Cascade.
           case "$PR_TYPE" in
             Feature|Bugfix|Chore|Hotfix) exit 0 ;;
@@ -265,18 +265,25 @@ jobs:
           # the template filled in. Rather than try to detect and strip
           # whatever GitHub auto-filled (a single commit's message when
           # there's exactly one commit, plus the repo's PR template
-          # unconditionally appended underneath it), just replace the body
-          # outright with a short, predictable summary line, including how
-          # many commits are being carried across.
-          commit_count="$(gh pr view "$PR_NUMBER" --json commits --jq '.commits | length')"
-          if [[ "$commit_count" == "1" ]]; then
-            commit_label="1 commit"
-          else
-            commit_label="$commit_count commits"
-          fi
+          # unconditionally appended underneath it), just replace both
+          # outright with a short, predictable title and a plain-English
+          # body.
+          #
+          # A commit count was tried in the body and dropped: `gh pr view
+          # --json commits` didn't reliably reflect the real branch diff
+          # (seen returning 1, and even the PR title showing 5, when
+          # uat..dev was actually 0 commits at the time) -- not worth
+          # chasing given nothing downstream depends on the number.
+          case "$PR_TYPE" in
+            Promotion)        type_word="promote" ;;
+            Backport)         type_word="backport" ;;
+            Cascade/backport) type_word="cascade" ;;
+          esac
 
-          gh pr edit "$PR_NUMBER" --body "$PR_TYPE: $HEAD_REF -> $BASE_REF ($commit_label)"
-          echo "Set PR body to a one-line $PR_TYPE summary ($commit_label)."
+          gh pr edit "$PR_NUMBER" \
+            --title "$type_word: $HEAD_REF -> $BASE_REF" \
+            --body "This is a $PR_TYPE pull request merging $HEAD_REF into $BASE_REF."
+          echo "Set PR title/body for this $PR_TYPE PR."
 
       - name: Create or update policy comment
         if: always()
