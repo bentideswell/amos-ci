@@ -48,12 +48,7 @@
           { "context": "CI / Workflow / Branch Protection" },
           { "context": "CI / Workflow / PR Content" }
         ],
-        "strict_required_status_checks_policy": true,
-        "required_status_checks__disabled": [
-          { "context": "CI / Code / Lint" },
-          { "context": "CI / Code / Test" },
-          { "context": "CI / Security / Security Scan" }
-        ]
+        "strict_required_status_checks_policy": false
       }
     }
   ]

@@ -26,26 +26,17 @@ jobs:
       cancel-in-progress: true
 
     steps:
-      - name: Check out Amos CI policy scripts
-        uses: actions/checkout@v4
-        with:
-          repository: bentideswell/amos-ci
-          ref: main
-          sparse-checkout: |
-            .github/scripts
-          sparse-checkout-cone-mode: false
-          path: .amos-ci
-
+      # No checkout of amos-ci needed here: this composite action lives in
+      # amos-ci itself, and referencing it via `uses: owner/repo/path@ref`
+      # makes the runner download that repo's content automatically (a
+      # scoped, auto-expiring token GitHub issues for `uses:` references --
+      # see README) rather than needing a PAT once amos-ci is private.
       - name: Evaluate Git policy
         id: policy
-        shell: bash
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          set -euo pipefail
-          chmod +x .amos-ci/.github/scripts/evaluate-policy.sh
-          .amos-ci/.github/scripts/evaluate-policy.sh "$HEAD_REF" "$BASE_REF" >> "$GITHUB_OUTPUT"
+        uses: bentideswell/amos-ci/.github/actions/evaluate-policy@main
+        with:
+          head_ref: ${{ github.head_ref }}
+          base_ref: ${{ github.base_ref }}
 
       - name: Check branch freshness / promotion safety
         id: freshness
@@ -247,7 +238,19 @@ jobs:
           # is a manual "Delete branch" click for now; the only reliable
           # automated fix is a scheduled job that sweeps merged PRs
           # directly, judged not worth the added complexity for now.
-          gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" || true
+          merge_output="$(gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" 2>&1)" && merge_status=0 || merge_status=$?
+
+          if [[ $merge_status -ne 0 ]]; then
+            # Arming auto-merge can fail for the expected, benign reason
+            # above (a required check already failed) -- but it can also
+            # fail for a reason that deserves attention (a transient API
+            # error, a permissions problem, auto-merge disabled at the repo
+            # level). Surface every failure as a visible warning instead of
+            # discarding it silently, so a PR left needing a manual merge
+            # doesn't sit with no signal anywhere that auto-merge never
+            # armed.
+            echo "::warning::Failed to arm auto-merge for PR #$PR_NUMBER: $merge_output"
+          fi
 
       - name: Set PR title/body for Promotion/Backport/Cascade PRs
         if: github.event.action == 'opened' && steps.policy.outputs.valid == 'true'
@@ -436,28 +439,20 @@ jobs:
       cancel-in-progress: true
 
     steps:
-      - name: Check out Amos CI policy scripts
-        uses: actions/checkout@v4
-        with:
-          repository: bentideswell/amos-ci
-          ref: main
-          sparse-checkout: |
-            .github/scripts
-          sparse-checkout-cone-mode: false
-          path: .amos-ci
-
-      - name: Validate PR content
-        id: content
+      # Fetches title/body separately from validating them (below), because
+      # the validation itself now runs as a cross-repo composite action --
+      # see evaluate-policy's comment above for why -- and its inputs must
+      # be passed as step outputs, not produced inline in the same step.
+      - name: Fetch current PR title/body
+        id: pr
         if: needs.policy.outputs.valid == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TYPE: ${{ needs.policy.outputs.pr_type }}
         run: |
           set -euo pipefail
-          chmod +x .amos-ci/.github/scripts/check-pr-content.sh
 
           # Fetch the PR's CURRENT title/body live rather than reading
           # github.event.pull_request.title/body -- that's a frozen snapshot
@@ -467,15 +462,34 @@ jobs:
           # Promotion/Backport/Cascade PRs. Validating against the stale
           # snapshot meant those PRs always failed here, even though the
           # PR itself was already correct by the time this step ran.
-          #
-          # PR title/body are untrusted, author-controlled text. They're read
-          # into shell variables via command substitution (not interpolated
-          # into the script body) specifically so they're read as data,
-          # never as shell syntax.
-          TITLE="$(gh pr view "$PR_NUMBER" --json title --jq '.title')"
-          BODY="$(gh pr view "$PR_NUMBER" --json body --jq '.body')"
+          title="$(gh pr view "$PR_NUMBER" --json title --jq '.title')"
+          body="$(gh pr view "$PR_NUMBER" --json body --jq '.body')"
 
-          printf '%s' "$BODY" | .amos-ci/.github/scripts/check-pr-content.sh "$PR_TYPE" "$TITLE" >> "$GITHUB_OUTPUT"
+          # A random per-run delimiter, not a fixed one like "EOF" -- a PR
+          # body that happens to contain a line matching a fixed delimiter
+          # would otherwise corrupt this multiline $GITHUB_OUTPUT write.
+          delim="pr_content_$(cat /proc/sys/kernel/random/uuid)"
+          {
+            echo "title<<$delim"
+            printf '%s\n' "$title"
+            echo "$delim"
+            echo "body<<$delim"
+            printf '%s\n' "$body"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      # title/body are passed as `with:` inputs, which the action turns into
+      # env vars internally (see check-pr-content/action.yml) rather than
+      # interpolating into a run: script -- they're untrusted, author-
+      # controlled text, so this keeps them data, never shell syntax.
+      - name: Validate PR content
+        id: content
+        if: needs.policy.outputs.valid == 'true'
+        uses: bentideswell/amos-ci/.github/actions/check-pr-content@main
+        with:
+          pr_type: ${{ needs.policy.outputs.pr_type }}
+          title: ${{ steps.pr.outputs.title }}
+          body: ${{ steps.pr.outputs.body }}
 
       - name: Ensure client-facing label exists
         if: always()

@@ -1,0 +1,45 @@
+name: Validate PR content
+description: >-
+  Checks a PR's title/body against Amos CI's content requirements
+  (Conventional Commits title, Release Notes section, Client impact line)
+  and decides whether the client-facing label applies, by running amos-ci's
+  own .github/scripts/check-pr-content.sh.
+inputs:
+  pr_type:
+    required: true
+  title:
+    description: The PR's current title (untrusted, author-controlled text).
+    required: true
+  body:
+    description: The PR's current body (untrusted, author-controlled text).
+    required: true
+outputs:
+  applicable:
+    value: ${{ steps.run.outputs.applicable }}
+  valid:
+    value: ${{ steps.run.outputs.valid }}
+  client_facing_required:
+    value: ${{ steps.run.outputs.client_facing_required }}
+  reasons:
+    value: ${{ steps.run.outputs.reasons }}
+runs:
+  using: composite
+  steps:
+    # See evaluate-policy/action.yml for why this needs no checkout.
+    #
+    # title/body are read into env vars, not interpolated as ${{ inputs.* }}
+    # directly into the run: script body -- they're untrusted, PR-author-
+    # controlled text, and env-var assignment (vs. textual substitution
+    # before the shell parses the line) is what keeps them data rather than
+    # shell syntax. Same reasoning the original inline step used.
+    - id: run
+      shell: bash
+      env:
+        PR_TYPE: ${{ inputs.pr_type }}
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+      run: |
+        set -euo pipefail
+        script="$GITHUB_ACTION_PATH/../../scripts/check-pr-content.sh"
+        chmod +x "$script"
+        printf '%s' "$BODY" | "$script" "$PR_TYPE" "$TITLE" >> "$GITHUB_OUTPUT"

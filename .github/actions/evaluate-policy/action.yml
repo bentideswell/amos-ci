@@ -1,0 +1,48 @@
+name: Evaluate Git policy
+description: >-
+  Decides branch-policy validity, PR type, required merge method/label, and
+  freshness mode for a head/base branch pair, by running amos-ci's own
+  .github/scripts/evaluate-policy.sh.
+inputs:
+  head_ref:
+    description: The PR's head (source) branch name.
+    required: true
+  base_ref:
+    description: The PR's base (target) branch name.
+    required: true
+outputs:
+  valid:
+    description: "true|false"
+    value: ${{ steps.run.outputs.valid }}
+  pr_type:
+    value: ${{ steps.run.outputs.pr_type }}
+  merge_method:
+    value: ${{ steps.run.outputs.merge_method }}
+  label:
+    value: ${{ steps.run.outputs.label }}
+  freshness_mode:
+    value: ${{ steps.run.outputs.freshness_mode }}
+  reason:
+    value: ${{ steps.run.outputs.reason }}
+runs:
+  using: composite
+  steps:
+    # No checkout needed: referencing this action via
+    # `uses: bentideswell/amos-ci/.github/actions/evaluate-policy@ref` makes
+    # the runner download amos-ci's own repository content automatically
+    # (a scoped, auto-expiring token GitHub issues for `uses:` references --
+    # see README), including .github/scripts alongside this action.yml. That
+    # sidesteps needing a PAT/App token to read amos-ci once it's private --
+    # unlike a plain `actions/checkout` of a different repo, which does need
+    # one. github.action_path (and the $GITHUB_ACTION_PATH env var it sets)
+    # points at this action's own directory in that downloaded copy.
+    - id: run
+      shell: bash
+      env:
+        HEAD_REF: ${{ inputs.head_ref }}
+        BASE_REF: ${{ inputs.base_ref }}
+      run: |
+        set -euo pipefail
+        script="$GITHUB_ACTION_PATH/../../scripts/evaluate-policy.sh"
+        chmod +x "$script"
+        "$script" "$HEAD_REF" "$BASE_REF" >> "$GITHUB_OUTPUT"

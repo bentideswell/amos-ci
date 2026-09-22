@@ -18,6 +18,7 @@ set -euo pipefail
 
 # ---- Config ----
 ACCOUNT="bentideswell"   # GitHub username or org login to apply the ruleset to
+SOURCE_REPO="amos-ci"   # The repo whose reusable workflows/actions other repos call into
 RULESET_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.github" && pwd)/ruleset.json"
 DRY_RUN="${DRY_RUN:-false}"   # DRY_RUN=true ./apply.sh, or pass --dry-run, to preview without writing
 
@@ -152,6 +153,40 @@ configure_repo_settings() {
   echo "Updated repo settings on $full (auto-merge, delete-on-merge, squash title/message from PR)"
 }
 
+configure_workflow_access() {
+  # Lets other repos in this org call amos-ci's reusable workflows and
+  # composite actions (uses: .../amos-ci/...@ref) once amos-ci itself is
+  # private -- without this, every consuming repo's CI fails to resolve
+  # those references. This is a property of amos-ci alone (SOURCE_REPO),
+  # not something the individual consuming repos in REPOS need: a caller
+  # just needs its own default Actions permissions switched on, which is
+  # the GitHub default and isn't touched here.
+  local full="${ACCOUNT}/${SOURCE_REPO}"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    local current
+    if ! current="$(gh api "repos/${full}/actions/permissions/access" --jq '.access_level' 2>&1)"; then
+      echo "  x could not read workflow access level for $full:" >&2
+      echo "$current" | sed 's/^/    /' >&2
+      return 1
+    fi
+    if [[ "$current" == "organization" || "$current" == "enterprise" ]]; then
+      echo "[dry-run] $full -- workflow access: already $current"
+    else
+      echo "[dry-run] $full -- workflow access: would set to organization (currently $current)"
+    fi
+    return 0
+  fi
+
+  local output
+  if ! output="$(gh api --method PUT "repos/${full}/actions/permissions/access" -f access_level=organization 2>&1)"; then
+    echo "  x failed to set workflow access level on $full:" >&2
+    echo "$output" | sed 's/^/    /' >&2
+    return 1
+  fi
+  echo "Set workflow access level on $full to 'organization' (other repos in $ACCOUNT can now call its reusable workflows/actions)"
+}
+
 overall_failed=()
 
 if [[ "$account_type" == "Organization" ]]; then
@@ -183,6 +218,14 @@ else
       overall_failed+=("ruleset: $repo")
     fi
   done
+fi
+
+if [[ "$account_type" == "Organization" ]]; then
+  echo
+  echo "---- Workflow access ($SOURCE_REPO) ----"
+  if ! configure_workflow_access; then
+    overall_failed+=("workflow access: $SOURCE_REPO")
+  fi
 fi
 
 echo

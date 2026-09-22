@@ -1,0 +1,35 @@
+name: Amos CI Self Test
+
+# Deliberately separate from amos-ci.yml. That file only triggers on
+# workflow_call now (other repos calling in) -- it doesn't run on this
+# repo's own PRs at all, since the branch-policy/PR-content checks it
+# composes assume the Amos dev/uat/main model, which amos-ci itself doesn't
+# follow (it just uses plain branch protection, configured in the UI).
+#
+# This file exists so a PR that changes .github/scripts or .github/actions
+# still gets validated against its OWN version of those files before merge
+# -- see .github/scripts/tests/*.sh. No workflow_call trigger: this is only
+# ever meaningful for amos-ci's own repo, not something other repos call.
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+jobs:
+  self-test:
+    name: Self Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run branch-policy tests
+        shell: bash
+        run: .github/scripts/tests/run-tests.sh
+
+      - name: Run PR-content tests
+        shell: bash
+        run: .github/scripts/tests/run-content-tests.sh
