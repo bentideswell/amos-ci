@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# Test runner for check-pr-content.sh.
+#
+# Same no-framework approach as run-tests.sh — calls the real script exactly
+# as the workflow does. PR bodies are multi-line, so each case is a call to
+# run_case with the body as a heredoc argument, rather than a single
+# pipe-delimited row.
+#
+# Usage:
+#   .github/scripts/tests/run-content-tests.sh
+#
+# Exit code is non-zero if any case fails.
+
+set -uo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+content_script="$script_dir/../check-pr-content.sh"
+
+pass=0
+fail=0
+
+if [[ -z "${NO_COLOR:-}" ]] && { [[ -t 1 ]] || [[ -n "${CI:-}" ]]; }; then
+  green=$'\033[32m'
+  red=$'\033[31m'
+  reset=$'\033[0m'
+else
+  green=''
+  red=''
+  reset=''
+fi
+
+run_case() {
+  local name="$1" pr_type="$2" title="$3" body="$4" \
+        expected_applicable="$5" expected_valid="$6" expected_client_facing="$7"
+
+  local output
+  output="$(printf '%s' "$body" | "$content_script" "$pr_type" "$title")"
+
+  local actual_applicable actual_valid actual_client_facing actual_reasons
+  actual_applicable="$(grep -m1 '^applicable=' <<<"$output" | cut -d= -f2-)"
+  actual_valid="$(grep -m1 '^valid=' <<<"$output" | cut -d= -f2-)"
+  actual_client_facing="$(grep -m1 '^client_facing_required=' <<<"$output" | cut -d= -f2-)"
+  actual_reasons="$(grep -m1 '^reasons=' <<<"$output" | cut -d= -f2-)"
+
+  if [[ "$actual_applicable" == "$expected_applicable" \
+     && "$actual_valid" == "$expected_valid" \
+     && "$actual_client_facing" == "$expected_client_facing" ]]; then
+    echo "${green}PASS${reset}  $name"
+    pass=$((pass + 1))
+  else
+    echo "${red}FAIL${reset}  $name"
+    echo "        expected applicable=$expected_applicable valid=$expected_valid client_facing_required=$expected_client_facing"
+    echo "        got      applicable=$actual_applicable valid=$actual_valid client_facing_required=$actual_client_facing"
+    [[ -n "$actual_reasons" ]] && echo "        reasons: $actual_reasons"
+    fail=$((fail + 1))
+  fi
+}
+
+# --- Promotion/backport PRs are exempt regardless of content ---
+run_case "promotion PR, empty body is fine" \
+  "Promotion" "Merge dev into uat" "" \
+  "false" "true" "false"
+
+run_case "backport PR, empty body is fine" \
+  "Backport" "Merge uat into dev" "" \
+  "false" "true" "false"
+
+# --- A fully correct Feature PR, client-visible ---
+run_case "feature PR, everything present, client-visible" \
+  "Feature" "feat: add invoice export" \
+"$(cat <<'EOF'
+## Release Notes
+
+### Added
+- Invoice export to CSV.
+
+## Client Impact
+
+Client impact: You can now export invoices to CSV from the Billing screen.
+EOF
+)" \
+  "true" "true" "true"
+
+# --- Missing Release Notes section entirely ---
+run_case "feature PR, no Release Notes heading" \
+  "Feature" "feat: add invoice export" \
+"$(cat <<'EOF'
+Client impact: You can now export invoices to CSV from the Billing screen.
+EOF
+)" \
+  "true" "false" "true"
+
+# --- Release Notes present but only the template placeholder left ---
+run_case "feature PR, Release Notes left as empty template" \
+  "Feature" "feat: add invoice export" \
+"$(cat <<'EOF'
+## Release Notes
+
+<!--
+Delete whichever subsections don't apply. Delete this whole section only if
+the PR is a pure promotion/backport with nothing new to log.
+-->
+
+### Added
+-
+
+### Fixed
+-
+
+## Client Impact
+
+Client impact: You can now export invoices to CSV from the Billing screen.
+EOF
+)" \
+  "true" "false" "true"
+
+# --- Client impact missing ---
+run_case "bugfix PR, no Client impact line" \
+  "Bugfix" "fix: correct null pointer" \
+"$(cat <<'EOF'
+## Release Notes
+
+### Fixed
+- Query filter no longer throws on an empty value.
+EOF
+)" \
+  "true" "false" "false"
+
+# --- Client impact says none: not client-facing, no label ---
+run_case "chore PR, client impact none" \
+  "Chore" "chore: bump AWS SDK" \
+"$(cat <<'EOF'
+## Release Notes
+
+### Changed
+- Updated AWS SDK to v3.450.
+
+Client impact: none
+EOF
+)" \
+  "true" "true" "false"
+
+# --- Client impact describes a real change: client-facing required ---
+run_case "hotfix PR, client-visible impact" \
+  "Hotfix" "hotfix: fix hire status" \
+"$(cat <<'EOF'
+## Release Notes
+
+### Fixed
+- Hire status webhook retried on timeout.
+
+Client impact: Candidate hire status now updates reliably even during a brief outage.
+EOF
+)" \
+  "true" "true" "true"
+
+# --- Bad title ---
+run_case "feature PR, non-conventional title" \
+  "Feature" "Add invoice export" \
+"$(cat <<'EOF'
+## Release Notes
+
+### Added
+- Invoice export to CSV.
+
+Client impact: You can now export invoices to CSV.
+EOF
+)" \
+  "true" "false" "true"
+
+echo
+echo "$pass passed, $fail failed"
+
+[[ "$fail" -eq 0 ]]

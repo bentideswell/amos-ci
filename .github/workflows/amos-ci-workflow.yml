@@ -1,0 +1,555 @@
+name: Amos / Workflow
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+
+jobs:
+  policy:
+    name: Branch Protection
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      valid: ${{ steps.policy.outputs.valid }}
+      pr_type: ${{ steps.policy.outputs.pr_type }}
+    concurrency:
+      group: amos-ci-policy-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Check out Amos CI policy scripts
+        uses: actions/checkout@v4
+        with:
+          repository: amos-ie/amos-ci
+          ref: main
+          sparse-checkout: |
+            .github/scripts
+          sparse-checkout-cone-mode: false
+          path: .amos-ci
+
+      - name: Evaluate Git policy
+        id: policy
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          chmod +x .amos-ci/.github/scripts/evaluate-policy.sh
+          .amos-ci/.github/scripts/evaluate-policy.sh "$HEAD_REF" "$BASE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Check branch freshness / promotion safety
+        id: freshness
+        if: steps.policy.outputs.valid == 'true' && steps.policy.outputs.freshness_mode != 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          MODE: ${{ steps.policy.outputs.freshness_mode }}
+        run: |
+          set -euo pipefail
+
+          # GitHub's compare API returns:
+          # - "behind"    when HEAD is behind BASE
+          # - "ahead"     when HEAD contains BASE and has additional commits
+          # - "identical" when both point at the same commit
+          # - "diverged"  when each side has commits the other side lacks
+          #
+          # We compare BASE...HEAD. For the checks below, BASE must be fully
+          # contained in HEAD. This is safe for topic/hotfix PRs and also
+          # prevents promotion over an un-backported hotfix.
+
+          comparison="$(
+            gh api \
+              "repos/$GH_REPO/compare/$BASE_REF...$HEAD_REF" \
+              --jq '{status: .status, ahead_by: .ahead_by, behind_by: .behind_by}'
+          )"
+
+          status="$(jq -r '.status' <<<"$comparison")"
+          ahead_by="$(jq -r '.ahead_by' <<<"$comparison")"
+          behind_by="$(jq -r '.behind_by' <<<"$comparison")"
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "ahead_by=$ahead_by" >> "$GITHUB_OUTPUT"
+          echo "behind_by=$behind_by" >> "$GITHUB_OUTPUT"
+
+          case "$status" in
+            ahead|identical)
+              echo "safe=true" >> "$GITHUB_OUTPUT"
+              ;;
+
+            behind|diverged)
+              echo "safe=false" >> "$GITHUB_OUTPUT"
+
+              if [[ "$MODE" == "source-must-contain-target" ]]; then
+                echo "::error::The source branch does not contain the latest $BASE_REF. Update $HEAD_REF from $BASE_REF before merging."
+              else
+                echo "::error::$BASE_REF contains commits that are not present in $HEAD_REF. Backport/cascade those changes first; do not merge $HEAD_REF into $BASE_REF yet."
+              fi
+
+              exit 1
+              ;;
+
+            *)
+              echo "::error::Unexpected compare status: $status"
+              exit 1
+              ;;
+          esac
+
+      - name: Build policy summary
+        if: always()
+        shell: bash
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          VALID: ${{ steps.policy.outputs.valid }}
+          PR_TYPE: ${{ steps.policy.outputs.pr_type }}
+          MERGE_METHOD: ${{ steps.policy.outputs.merge_method }}
+          FRESHNESS_MODE: ${{ steps.policy.outputs.freshness_mode }}
+          REASON: ${{ steps.policy.outputs.reason }}
+          FRESHNESS_STATUS: ${{ steps.freshness.outputs.status }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Amos Git Policy"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Source | \`$HEAD_REF\` |"
+            echo "| Target | \`$BASE_REF\` |"
+
+            if [[ "$VALID" != "true" ]]; then
+              echo "| Result | **INVALID** |"
+              echo
+              echo "❌ $REASON"
+              exit 0
+            fi
+
+            echo "| PR type | $PR_TYPE |"
+
+            if [[ "$MERGE_METHOD" == "squash" ]]; then
+              echo "| Required merge method | **SQUASH** |"
+            else
+              echo "| Required merge method | **MERGE COMMIT** |"
+            fi
+
+            case "$FRESHNESS_MODE" in
+              source-must-contain-target)
+                if [[ "$FRESHNESS_STATUS" == "ahead" || "$FRESHNESS_STATUS" == "identical" ]]; then
+                  echo "| Branch freshness | ✅ Source contains latest target |"
+                else
+                  echo "| Branch freshness | ❌ Source is not based on latest target |"
+                fi
+                ;;
+
+              target-contained-in-source)
+                if [[ "$FRESHNESS_STATUS" == "ahead" || "$FRESHNESS_STATUS" == "identical" ]]; then
+                  echo "| Promotion safety | ✅ Target has no un-backported commits |"
+                else
+                  echo "| Promotion safety | ❌ Target contains commits missing from source |"
+                fi
+                ;;
+
+              none)
+                echo "| Branch freshness | Not required for this backport/cascade |"
+                ;;
+            esac
+
+            echo
+            echo "✅ Branch name and PR direction comply with the Amos workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Ensure policy labels exist
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh label create "merge:squash" \
+            --repo "$GH_REPO" \
+            --description "This PR must use Squash and merge" \
+            --color "1D76DB" \
+            --force
+
+          gh label create "merge:merge-commit" \
+            --repo "$GH_REPO" \
+            --description "This PR must use Create a merge commit" \
+            --color "5319E7" \
+            --force
+
+      - name: Apply merge-method label
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          VALID: ${{ steps.policy.outputs.valid }}
+          REQUIRED_LABEL: ${{ steps.policy.outputs.label }}
+        run: |
+          set -euo pipefail
+
+          gh pr edit "$PR_NUMBER" --remove-label "merge:squash" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --remove-label "merge:merge-commit" 2>/dev/null || true
+
+          if [[ "$VALID" == "true" ]]; then
+            gh pr edit "$PR_NUMBER" --add-label "$REQUIRED_LABEL"
+          fi
+
+      - name: Enable auto-merge
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          VALID: ${{ steps.policy.outputs.valid }}
+          MERGE_METHOD: ${{ steps.policy.outputs.merge_method }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$VALID" != "true" ]]; then
+            exit 0
+          fi
+
+          # Arms GitHub's native auto-merge with the method this PR type
+          # requires (squash for topic branches, merge commit for
+          # promotions/backports/cascades), so a compliant PR merges itself
+          # the moment every required check reports passing -- nobody has to
+          # remember to pick the right button. This re-runs on every push, so
+          # it's harmless to call again if auto-merge is already enabled.
+          #
+          # If a required check has already failed by the time this runs,
+          # GitHub refuses to arm auto-merge at all (it errors rather than
+          # arming-and-waiting) -- that failure here is an expected, non-fatal
+          # outcome, not a bug: it just means this PR needs a normal manual
+          # merge once it's fixed, same as before this step existed.
+          gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" || true
+
+      - name: Create or update policy comment
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          VALID: ${{ steps.policy.outputs.valid }}
+          PR_TYPE: ${{ steps.policy.outputs.pr_type }}
+          MERGE_METHOD: ${{ steps.policy.outputs.merge_method }}
+          FRESHNESS_MODE: ${{ steps.policy.outputs.freshness_mode }}
+          FRESHNESS_STATUS: ${{ steps.freshness.outputs.status }}
+          REASON: ${{ steps.policy.outputs.reason }}
+        run: |
+          set -euo pipefail
+
+          marker='<!-- amos-git-policy -->'
+          body_file="$(mktemp)"
+          trap 'rm -f "$body_file"' EXIT
+
+          {
+            echo "$marker"
+            echo "## Amos Git Policy"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Source | \`$HEAD_REF\` |"
+            echo "| Target | \`$BASE_REF\` |"
+
+            if [[ "$VALID" != "true" ]]; then
+              echo "| Result | **INVALID** |"
+              echo
+              echo "❌ **This PR does not follow the branching policy and cannot be merged.**"
+              echo
+              echo "$REASON"
+            else
+              echo "| PR type | $PR_TYPE |"
+
+              if [[ "$MERGE_METHOD" == "squash" ]]; then
+                echo "| Required merge method | **SQUASH** |"
+              else
+                echo "| Required merge method | **MERGE COMMIT** |"
+              fi
+
+              case "$FRESHNESS_MODE" in
+                source-must-contain-target)
+                  if [[ "$FRESHNESS_STATUS" == "ahead" || "$FRESHNESS_STATUS" == "identical" ]]; then
+                    echo "| Branch freshness | ✅ Up to date |"
+                  else
+                    echo "| Branch freshness | ❌ Source does not contain latest target |"
+                  fi
+                  ;;
+                target-contained-in-source)
+                  if [[ "$FRESHNESS_STATUS" == "ahead" || "$FRESHNESS_STATUS" == "identical" ]]; then
+                    echo "| Promotion safety | ✅ No un-backported target commits |"
+                  else
+                    echo "| Promotion safety | ❌ Target has commits missing from source |"
+                  fi
+                  ;;
+                none)
+                  echo "| Branch freshness | Not required for this backport/cascade |"
+                  ;;
+              esac
+
+              echo
+
+              if [[ "$FRESHNESS_MODE" == "source-must-contain-target" ]] && \
+                 [[ "$FRESHNESS_STATUS" != "ahead" && "$FRESHNESS_STATUS" != "identical" ]]; then
+                echo "❌ **This PR is not ready to merge.**"
+                echo
+                echo "Update \`$HEAD_REF\` from \`$BASE_REF\`, then push the updated source branch."
+              elif [[ "$FRESHNESS_MODE" == "target-contained-in-source" ]] && \
+                   [[ "$FRESHNESS_STATUS" != "ahead" && "$FRESHNESS_STATUS" != "identical" ]]; then
+                echo "❌ **This promotion is not ready to merge.**"
+                echo
+                echo "\`$BASE_REF\` contains commits that are not present in \`$HEAD_REF\`. Complete the required backport/cascade first."
+                echo
+                echo "> Do **not** merge \`$BASE_REF\` into \`$HEAD_REF\` merely to satisfy this check."
+              else
+                echo "✅ This PR follows the branching policy."
+
+                if [[ "$MERGE_METHOD" == "squash" ]]; then
+                  echo
+                  echo "> **When merging, use _Squash and merge_. Do not create a merge commit.**"
+                else
+                  echo
+                  echo "> **When merging, use _Create a merge commit_. Do not squash this PR.**"
+                fi
+              fi
+            fi
+
+            echo
+            echo "_This comment is maintained automatically by the Amos Git Policy workflow._"
+          } > "$body_file"
+
+          comment_id="$(
+            gh api "repos/$GH_REPO/issues/$PR_NUMBER/comments?per_page=100" \
+              --paginate \
+              --jq ".[] | select(.body | contains(\"$marker\")) | .id" \
+              | head -n 1
+          )"
+
+          if [[ -n "$comment_id" ]]; then
+            gh api \
+              --method PATCH \
+              "repos/$GH_REPO/issues/comments/$comment_id" \
+              --raw-field "body=$(cat "$body_file")" \
+              >/dev/null
+          else
+            gh api \
+              --method POST \
+              "repos/$GH_REPO/issues/$PR_NUMBER/comments" \
+              --raw-field "body=$(cat "$body_file")" \
+              >/dev/null
+          fi
+
+      - name: Enforce PR direction
+        if: steps.policy.outputs.valid != 'true'
+        shell: bash
+        env:
+          REASON: ${{ steps.policy.outputs.reason }}
+        run: |
+          echo "::error::$REASON"
+          exit 1
+
+  pr-content:
+    name: PR Content
+    if: github.event.action != 'closed'
+    needs: policy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    concurrency:
+      group: amos-ci-pr-content-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Check out Amos CI policy scripts
+        uses: actions/checkout@v4
+        with:
+          repository: amos-ie/amos-ci
+          ref: main
+          sparse-checkout: |
+            .github/scripts
+          sparse-checkout-cone-mode: false
+          path: .amos-ci
+
+      - name: Validate PR content
+        id: content
+        if: needs.policy.outputs.valid == 'true'
+        shell: bash
+        env:
+          # PR title/body are untrusted, author-controlled text. They're passed
+          # in as env vars (not interpolated into the script body) specifically
+          # so they're read as data, never as shell syntax.
+          PR_TYPE: ${{ needs.policy.outputs.pr_type }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          chmod +x .amos-ci/.github/scripts/check-pr-content.sh
+          printf '%s' "$BODY" | .amos-ci/.github/scripts/check-pr-content.sh "$PR_TYPE" "$TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure client-facing label exists
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh label create "client-facing" \
+            --repo "$GH_REPO" \
+            --description "A client would notice this change — surfaced in the client release notes" \
+            --color "0E8A16" \
+            --force
+
+      - name: Apply client-facing label
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REQUIRED: ${{ steps.content.outputs.client_facing_required }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$REQUIRED" == "true" ]]; then
+            gh pr edit "$PR_NUMBER" --add-label "client-facing"
+          else
+            gh pr edit "$PR_NUMBER" --remove-label "client-facing" 2>/dev/null || true
+          fi
+
+      - name: Comment on PR content status
+        if: needs.policy.outputs.valid == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CONTENT_VALID: ${{ steps.content.outputs.valid }}
+          REASONS: ${{ steps.content.outputs.reasons }}
+        run: |
+          set -euo pipefail
+
+          marker='<!-- amos-pr-content -->'
+
+          comment_id="$(
+            gh api "repos/$GH_REPO/issues/$PR_NUMBER/comments?per_page=100" \
+              --paginate \
+              --jq ".[] | select(.body | contains(\"$marker\")) | .id" \
+              | head -n 1
+          )"
+
+          # No prior marker comment and content is fine: nothing to say, and
+          # nothing to clean up. Skip the API calls entirely on this (the
+          # common) path.
+          if [[ "$CONTENT_VALID" == "true" && -z "$comment_id" ]]; then
+            exit 0
+          fi
+
+          body_file="$(mktemp)"
+          trap 'rm -f "$body_file"' EXIT
+
+          if [[ "$CONTENT_VALID" != "true" ]]; then
+            {
+              echo "$marker"
+              echo "## Amos PR Content"
+              echo
+              echo "❌ **This PR is missing required content and cannot be merged.**"
+              echo
+              IFS=';' read -ra items <<< "$REASONS"
+              for item in "${items[@]}"; do
+                trimmed="$(echo "$item" | xargs)"
+                [[ -n "$trimmed" ]] && echo "- $trimmed"
+              done
+              echo
+              echo "See \`pull_request_template.md\` for the required sections."
+              echo
+              echo "_This comment is maintained automatically by the Amos PR Content workflow._"
+            } > "$body_file"
+          else
+            # Content was previously invalid (a marker comment exists) and has
+            # since been fixed. Update that comment in place rather than
+            # leaving a stale "cannot be merged" message on a PR that's now
+            # compliant.
+            {
+              echo "$marker"
+              echo "## Amos PR Content"
+              echo
+              echo "✅ **This PR's required content is now complete.**"
+              echo
+              echo "_This comment is maintained automatically by the Amos PR Content workflow._"
+            } > "$body_file"
+          fi
+
+          if [[ -n "$comment_id" ]]; then
+            gh api --method PATCH "repos/$GH_REPO/issues/comments/$comment_id" \
+              --raw-field "body=$(cat "$body_file")" >/dev/null
+          else
+            gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/comments" \
+              --raw-field "body=$(cat "$body_file")" >/dev/null
+          fi
+
+      - name: Fail on missing PR content
+        if: needs.policy.outputs.valid == 'true' && steps.content.outputs.valid != 'true'
+        env:
+          REASONS: ${{ steps.content.outputs.reasons }}
+        run: |
+          echo "::error::PR content requirements not met: $REASONS"
+          exit 1
+
+  cleanup:
+    name: Branch Cleanup
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Delete merged topic/hotfix branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+
+          # Never try to delete branches from a fork.
+          if [[ "$HEAD_REPO" != "$GH_REPO" ]]; then
+            echo "PR came from $HEAD_REPO; skipping branch deletion."
+            exit 0
+          fi
+
+          case "$HEAD_REF" in
+            feature/*|bugfix/*|chore/*|hotfix/*)
+              echo "Deleting merged branch: $HEAD_REF"
+              gh api \
+                --method DELETE \
+                "repos/$GH_REPO/git/refs/heads/$HEAD_REF"
+              ;;
+            dev|uat|main)
+              echo "Permanent branch $HEAD_REF will not be deleted."
+              ;;
+            *)
+              echo "Branch $HEAD_REF does not match an auto-delete pattern; leaving it in place."
+              ;;
+          esac

@@ -1,0 +1,12 @@
+name: Amos / Security
+
+on:
+  workflow_call:
+
+jobs:
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: No security checks configured yet
+        run: echo "Security checks are not yet implemented."

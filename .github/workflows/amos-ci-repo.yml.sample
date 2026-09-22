@@ -1,0 +1,41 @@
+# Amos CI — drop-in workflow for amos-* repositories.
+#
+# To use this in a repo:
+#   1. Copy this file to .github/workflows/amos-ci.yml in that repository
+#      (drop the .sample extension so GitHub Actions picks it up).
+#   2. Add any repo-specific jobs/steps below the shared one — this file is
+#      a normal caller workflow, so local jobs can sit alongside the `uses:`
+#      job without affecting it.
+
+name: Amos
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+      - closed
+
+jobs:
+  amos-ci:
+    name: CI
+    concurrency:
+      group: amos-ci-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    uses: amos-ie/amos-ci/.github/workflows/amos-ci.yml@main
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+  # Repo-specific jobs go here, e.g.:
+  #
+  # custom-check:
+  #   name: Custom check
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: ./scripts/repo-specific-check.sh
