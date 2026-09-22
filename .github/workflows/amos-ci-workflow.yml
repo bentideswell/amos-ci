@@ -238,15 +238,16 @@ jobs:
           # outcome, not a bug: it just means this PR needs a normal manual
           # merge once it's fixed, same as before this step existed.
           #
-          # --delete-branch: repo's delete_branch_on_merge setting alone
-          # doesn't reliably clean up after a merge performed by a bot/app
-          # token (this one runs as github-actions[bot], via GITHUB_TOKEN) --
-          # see README for the same GITHUB_TOKEN-vs-human distinction that
-          # already ruled out a pull_request:closed cleanup job. Cheapest
-          # thing to try first; if branches still aren't deleted, that's
-          # confirmation the same limitation reaches this flag too, and the
-          # next step up is a scheduled job that sweeps merged PRs directly.
-          gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" --delete-branch || true
+          # No --delete-branch: tried it, didn't work -- the repo's
+          # delete_branch_on_merge setting (and this flag) don't reliably
+          # clean up after a merge performed by a bot/app token (this one
+          # runs as github-actions[bot], via GITHUB_TOKEN), the same
+          # GITHUB_TOKEN-vs-human distinction that already ruled out a
+          # pull_request:closed cleanup job -- see README. Branch deletion
+          # is a manual "Delete branch" click for now; the only reliable
+          # automated fix is a scheduled job that sweeps merged PRs
+          # directly, judged not worth the added complexity for now.
+          gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" || true
 
       - name: Set PR title/body for Promotion/Backport/Cascade PRs
         if: github.event.action == 'opened' && steps.policy.outputs.valid == 'true'
