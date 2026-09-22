@@ -237,7 +237,16 @@ jobs:
           # arming-and-waiting) -- that failure here is an expected, non-fatal
           # outcome, not a bug: it just means this PR needs a normal manual
           # merge once it's fixed, same as before this step existed.
-          gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" || true
+          #
+          # --delete-branch: repo's delete_branch_on_merge setting alone
+          # doesn't reliably clean up after a merge performed by a bot/app
+          # token (this one runs as github-actions[bot], via GITHUB_TOKEN) --
+          # see README for the same GITHUB_TOKEN-vs-human distinction that
+          # already ruled out a pull_request:closed cleanup job. Cheapest
+          # thing to try first; if branches still aren't deleted, that's
+          # confirmation the same limitation reaches this flag too, and the
+          # next step up is a scheduled job that sweeps merged PRs directly.
+          gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" --delete-branch || true
 
       - name: Set PR title/body for Promotion/Backport/Cascade PRs
         if: github.event.action == 'opened' && steps.policy.outputs.valid == 'true'
@@ -441,15 +450,30 @@ jobs:
         if: needs.policy.outputs.valid == 'true'
         shell: bash
         env:
-          # PR title/body are untrusted, author-controlled text. They're passed
-          # in as env vars (not interpolated into the script body) specifically
-          # so they're read as data, never as shell syntax.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TYPE: ${{ needs.policy.outputs.pr_type }}
-          TITLE: ${{ github.event.pull_request.title }}
-          BODY: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
           chmod +x .amos-ci/.github/scripts/check-pr-content.sh
+
+          # Fetch the PR's CURRENT title/body live rather than reading
+          # github.event.pull_request.title/body -- that's a frozen snapshot
+          # of the webhook payload from when the PR was opened, and doesn't
+          # reflect the "policy" job's own "Set PR title/body" step, which
+          # runs earlier in the same workflow run and rewrites both for
+          # Promotion/Backport/Cascade PRs. Validating against the stale
+          # snapshot meant those PRs always failed here, even though the
+          # PR itself was already correct by the time this step ran.
+          #
+          # PR title/body are untrusted, author-controlled text. They're read
+          # into shell variables via command substitution (not interpolated
+          # into the script body) specifically so they're read as data,
+          # never as shell syntax.
+          TITLE="$(gh pr view "$PR_NUMBER" --json title --jq '.title')"
+          BODY="$(gh pr view "$PR_NUMBER" --json body --jq '.body')"
+
           printf '%s' "$BODY" | .amos-ci/.github/scripts/check-pr-content.sh "$PR_TYPE" "$TITLE" >> "$GITHUB_OUTPUT"
 
       - name: Ensure client-facing label exists
