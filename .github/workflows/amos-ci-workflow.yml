@@ -239,6 +239,45 @@ jobs:
           # merge once it's fixed, same as before this step existed.
           gh pr merge "$PR_NUMBER" --auto --"$MERGE_METHOD" || true
 
+      - name: Set PR body for Promotion/Backport/Cascade PRs
+        if: github.event.action == 'opened' && steps.policy.outputs.valid == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TYPE: ${{ steps.policy.outputs.pr_type }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+
+          # Same "applicable" split as check-pr-content.sh: these PR types
+          # require the template's sections filled in, so leave their body
+          # alone -- this step only touches Promotion/Backport/Cascade.
+          case "$PR_TYPE" in
+            Feature|Bugfix|Chore|Hotfix) exit 0 ;;
+          esac
+
+          # A Promotion/Backport/Cascade PR moves already-described commits
+          # between branches -- there's nothing new to describe, and
+          # check-pr-content.sh already exempts these PR types from needing
+          # the template filled in. Rather than try to detect and strip
+          # whatever GitHub auto-filled (a single commit's message when
+          # there's exactly one commit, plus the repo's PR template
+          # unconditionally appended underneath it), just replace the body
+          # outright with a short, predictable summary line, including how
+          # many commits are being carried across.
+          commit_count="$(gh pr view "$PR_NUMBER" --json commits --jq '.commits | length')"
+          if [[ "$commit_count" == "1" ]]; then
+            commit_label="1 commit"
+          else
+            commit_label="$commit_count commits"
+          fi
+
+          gh pr edit "$PR_NUMBER" --body "$PR_TYPE: $HEAD_REF -> $BASE_REF ($commit_label)"
+          echo "Set PR body to a one-line $PR_TYPE summary ($commit_label)."
+
       - name: Create or update policy comment
         if: always()
         shell: bash
@@ -514,42 +553,3 @@ jobs:
         run: |
           echo "::error::PR content requirements not met: $REASONS"
           exit 1
-
-  cleanup:
-    name: Branch Cleanup
-    if: github.event.action == 'closed' && github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Delete merged topic/hotfix branch
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          set -euo pipefail
-
-          # Never try to delete branches from a fork.
-          if [[ "$HEAD_REPO" != "$GH_REPO" ]]; then
-            echo "PR came from $HEAD_REPO; skipping branch deletion."
-            exit 0
-          fi
-
-          case "$HEAD_REF" in
-            feature/*|bugfix/*|chore/*|hotfix/*)
-              echo "Deleting merged branch: $HEAD_REF"
-              gh api \
-                --method DELETE \
-                "repos/$GH_REPO/git/refs/heads/$HEAD_REF"
-              ;;
-            dev|uat|main)
-              echo "Permanent branch $HEAD_REF will not be deleted."
-              ;;
-            *)
-              echo "Branch $HEAD_REF does not match an auto-delete pattern; leaving it in place."
-              ;;
-          esac

@@ -1,4 +1,17 @@
 <!--
+Promotion, Backport or Cascade PR (e.g. dev -> uat, uat -> main, a hotfix
+backport)? Skip this template entirely — delete everything below and
+replace it with a single line, e.g.:
+
+    Promotion: dev -> uat
+    Backport: uat -> dev
+    Cascade/backport: main -> uat
+
+No Release Notes or Client impact section is needed for these; the PR
+content check doesn't apply to this PR type.
+-->
+
+<!--
 PR TITLE: Conventional Commits format — <type>: <short description>
   e.g. feat: add invoice export to datahub module
   Types: feat / fix / chore / docs / test / refactor / perf
@@ -17,8 +30,6 @@ echo the title, just written for someone reading a changelog rather than a
 diff. Only break it into ### Added / ### Changed / ### Fixed if this PR
 genuinely spans more than one of them; don't add empty subsections just to
 match a template.
-Delete this whole section only for a pure promotion/backport with nothing
-new to log.
 -->
 
 
@@ -41,8 +52,6 @@ Client impact:
 ## Before merging
 
 - [ ] PR title follows format: `$type: $message`
-- [ ] `## Release Notes` filled in (or intentionally omitted for a pure promotion/backport)
+- [ ] `## Release Notes` filled in
 - [ ] `Client impact:` line filled in
 - [ ] Instructional comments above deleted
-
-
