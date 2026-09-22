@@ -1,0 +1,18 @@
+#
+# These lines can be used for quick testing
+#
+
+# Delete/Reset
+git checkout main && git branch -D dev uat && git push origin --delete dev uat
+
+git branch -D feature/a && git push origin --delete feature/a
+git branch -D hotfix/a && git push origin --delete hotfix/a
+
+# Setup
+git checkout main && git checkout -b dev && git push -u origin dev && git checkout -b uat && git push -u origin uat
+
+# Feature A
+git checkout dev && git checkout -b feature/a && echo a > a && git add a && git commit -m "Added file a" && git push -u origin feature/a
+
+# Feature B
+git checkout dev && git checkout -b feature/b && echo b > b && git add b && git commit -m "Added file ab" && git push -u origin feature/b
